@@ -1,6 +1,5 @@
 import numpy as np
 import open3d as o3d
-import open3d.visualization.gui as gui
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pyransac3d as pyrsc
@@ -22,6 +21,8 @@ import json
 from pathlib import Path
 from matplotlib.colors import to_rgb
 import argparse
+import re
+from datetime import datetime
 
 
 
@@ -35,6 +36,26 @@ def load_point_cloud(file_path):
     
     print(f"Loaded {len(pcd.points)} points")
     return pcd
+
+
+def create_run_output_dir(output_root, input_path):
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", input_path.stem).strip("._")
+    if not safe_stem:
+        safe_stem = "run"
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = root / f"{safe_stem}_{timestamp}"
+
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_dir = root / f"{safe_stem}_{timestamp}_{suffix}"
+
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
 ID_TO_NAME = {
     0: "ceiling",
@@ -451,7 +472,10 @@ def main(
     num_classes=7,
     device=None,
     visualize_network_output=False,
-    visualize_instances_flag=False
+    visualize_instances_flag=True,
+    enable_smoothing=True,
+    smooth_k=5,
+    smooth_max_points=500000
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_paths = checkpoint_paths 
@@ -463,6 +487,8 @@ def main(
     # Step 1: Load point cloud
     input_path = Path(input_file)
     pcd = load_point_cloud(input_path)
+    run_output_dir = create_run_output_dir(output_dir, input_path)
+    print(f"Run output directory: {run_output_dir}")
 
     # Step 2: Load models and run BIMNet
     print("\nLoading BIMNet models...")
@@ -475,8 +501,19 @@ def main(
 
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens
-    print("\nStep 0.5: Smoothing predictions with KNN...")
-    point_labels = smooth_labels_knn(pcd, point_labels, k=5)
+    point_count = len(pcd.points)
+    if enable_smoothing:
+        if point_count > smooth_max_points:
+            print(
+                f"\nStep 0.5: Skipping KNN smoothing because point count "
+                f"({point_count}) exceeds --smooth-max-points ({smooth_max_points})."
+            )
+            print("Use --smooth-max-points with a higher value to force smoothing.")
+        else:
+            print(f"\nStep 0.5: Smoothing predictions with KNN (k={smooth_k})...")
+            point_labels = smooth_labels_knn(pcd, point_labels, k=smooth_k)
+    else:
+        print("\nStep 0.5: KNN smoothing disabled (--no-smooth).")
     
     # if visualize_network_output:
     #     print("\nVisualizing BIMNet semantic prediction...")
@@ -534,16 +571,17 @@ def main(
 
     # Step 5: Extract BIM Data & Save
     print("\nStep 3: Extracting BIM Parameters and Saving...")
-    save_instances(all_instances, output_dir)
+    save_instances(all_instances, run_output_dir)
     
     bim_json_data = extract_bim_parameters(all_instances)
-    with open(Path(output_dir) / "bim_reconstruction_data.json", "w") as f:
+    with open(Path(run_output_dir) / "bim_reconstruction_data.json", "w") as f:
         json.dump(bim_json_data, f, indent=4)
-    print(f"BIM parameters saved to {output_dir}/bim_reconstruction_data.json")
+    print(f"BIM parameters saved to {run_output_dir}/bim_reconstruction_data.json")
 
     # Step 6: Optional visualization
     if visualize_instances_flag:
-        visualize_summary(all_instances, separated_classes, pcd)
+        print("\nStep 4: Visualizing extracted instances...")
+        visualize_instances(all_instances, show_by_class=False)
 
     return all_instances, separated_classes, pcd
 
@@ -551,14 +589,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="BIMNet semantic segmentation + DBSCAN instance extraction"
     )
-    parser.add_argument("--input_file", help="Path to input point cloud (.ply/.pcd)")
-    parser.add_argument("--output_dir", default="output_instances", help="Directory to save instance PLYs")
-    parser.add_argument("--checkpoint", action="append", default=[], help="Path(s) to BIMNet checkpoint(s)")
+    parser.add_argument("--input_file", required=True, help="Path to input point cloud (.ply/.pcd)")
+    parser.add_argument("--output_dir", default="output_instances", help="Root output directory (a new subfolder is created per run)")
+    parser.add_argument("--checkpoint", action="append", required=True, help="Path(s) to BIMNet checkpoint(s)")
     parser.add_argument("--cube_edge", type=int, default=96, help="Voxel grid edge length")
     parser.add_argument("--num_classes", type=int, default=7, help="Number of BIMNet output classes")
     parser.add_argument("--cpu", action="store_true", help="Force CPU")
     parser.add_argument("--vis-net", action="store_true", help="Visualize BIMNet output")
-    parser.add_argument("--vis-instances", action="store_true", help="Visualize DBSCAN instances")
+    parser.add_argument("--vis-instances", action="store_true", help="Visualize DBSCAN instances (legacy flag; visualization is already on by default)")
+    parser.add_argument("--no-vis-instances", action="store_true", help="Disable automatic instance visualization")
+    parser.add_argument("--no-smooth", action="store_true", help="Disable KNN label smoothing")
+    parser.add_argument("--smooth-k", type=int, default=5, help="K for KNN smoothing")
+    parser.add_argument(
+        "--smooth-max-points",
+        type=int,
+        default=500000,
+        help="Auto-skip KNN smoothing if point count exceeds this threshold",
+    )
     
     args = parser.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -571,5 +618,8 @@ if __name__ == "__main__":
         num_classes=args.num_classes,
         device=device,
         visualize_network_output=args.vis_net,
-        visualize_instances_flag=args.vis_instances
+        visualize_instances_flag=(not args.no_vis_instances) or args.vis_instances,
+        enable_smoothing=not args.no_smooth,
+        smooth_k=args.smooth_k,
+        smooth_max_points=args.smooth_max_points,
     )
