@@ -66,7 +66,7 @@ if __name__ == '__main__':
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the .pth model file")
     parser.add_argument("--dset_path", type=str, default="Scan-to-BIM", help="Path to dataset root")
     parser.add_argument("--cube_edge", type=int, default=96, help="Voxel size (must match training)")
-    parser.add_argument("--num_classes", type=int, default=8, help="Number of classes")
+    parser.add_argument("--num_classes", type=int, default=7, help="Number of classes")
     
     args = parser.parse_args()
     

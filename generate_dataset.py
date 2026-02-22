@@ -17,8 +17,30 @@ CLASSES = {
     'beam': 3,
     'column': 4,
     'window': 5,
-    'door': 6
+    'door': 6,
+    'clutter': 7
 }
+
+def add_random_clutter(all_points, all_labels, width, depth, height):
+    """Adds random boxes (tables/chairs/junk) labeled as 'unassigned' (-1)"""
+    num_clutter = random.randint(2, 5)
+    
+    for _ in range(num_clutter):
+        # Random size (smallish objects)
+        cw = np.random.uniform(0.3, 1.0)
+        cd = np.random.uniform(0.3, 1.0)
+        ch = np.random.uniform(0.3, 1.0)
+        
+        # Random position (on floor)
+        cx = np.random.uniform(0.5, width - 0.5)
+        cy = np.random.uniform(0.5, depth - 0.5)
+        cz = ch / 2.0 # Sitting on floor
+        
+        # Label 7 maps to -1 (Ignore) in your dataset loader
+        p, l = create_box_points([cw, cd, ch], [cx, cy, cz], 7, 500)
+        
+        all_points.append(p)
+        all_labels.append(l)
 
 def create_box_points(extents, translation, label_id, num_points):
     """Generates points on the surface of a box."""
@@ -108,6 +130,8 @@ def generate_random_room(filename):
         p_win, l_win = create_plane(1.2, 1.2, CLASSES['window'], 1000) # 1.2m window
         p_win = transform_points(p_win, [0.05, win_y, 1.0], rotate_axis='y') # 1m height
         all_points.append(p_win); all_labels.append(l_win)
+
+    add_random_clutter(all_points, all_labels, width, depth, height)
 
     # 5. Merge & Save
     points = np.vstack(all_points)

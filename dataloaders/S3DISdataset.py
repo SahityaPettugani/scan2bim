@@ -356,15 +356,26 @@ class S3DISDataset(Dataset):
         # --- AGGRESSIVE REBALANCING ---
         # 0:Ceil, 1:Floor, 2:Wall, 3:Beam, 4:Col, 5:Win, 6:Door
         
-        weights[0] *= 1.0   # Suppress Ceiling (Too dominant)
-        weights[1] *= 5.0   # Boost Floor (Often messy)
-        weights[2] *= 10.0  # Boost Wall (Critical structure)
+        # weights[0] *= 1.0   # Suppress Ceiling (Too dominant)
+        # weights[1] *= 5.0   # Boost Floor (Often messy)
+        # weights[2] *= 10.0  # Boost Wall (Critical structure)
         
-        # Super-Boost Rare/Thin Classes
-        weights[3] *= 10.0  # Beam 
-        weights[4] *= 10.0  # Column
-        weights[5] *= 10.0  # Window
-        weights[6] *= 10.0  # Door
+        # # Super-Boost Rare/Thin Classes
+        # weights[3] *= 10.0  # Beam 
+        # weights[4] *= 10.0  # Column
+        # weights[5] *= 10.0  # Window
+        # weights[6] *= 10.0  # Door
+        weights[0] *= 5.0   # Ceiling (Normal)
+        weights[1] *= 2.0   # Floor (Normal)
+        
+        # 2. Keep a slight boost on structures, but much lower than before
+        weights[2] *= 2.0   # Wall (Was 10x)
+        
+        # 3. Keep a moderate boost on rare classes to protect them
+        weights[3] *= 5.0   # Beam (Was 10-20x)
+        weights[4] *= 5.0   # Column
+        weights[5] *= 2.0   # Window
+        weights[6] *= 2.0   # Door
         weights = weights / weights.mean()
 
         return weights.astype(np.float32)
