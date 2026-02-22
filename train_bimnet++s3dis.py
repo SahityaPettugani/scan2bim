@@ -1,3 +1,5 @@
+import warnings
+warnings.filterwarnings("ignore", module="pydantic")
 import numpy as np
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
@@ -9,6 +11,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch import nn
 import argparse
+from torch import GradScaler, autocast
 
 from model.bimnet import BIMNet
 from util.losses import ClassWiseCrossEntropyLoss, HNMCrossEntropyLoss
@@ -16,8 +19,7 @@ from dataloaders.PCSdataset import PCSDataset
 from dataloaders.S3DISdataset import S3DISDataset
 from util.metrics import Metrics
 from util.common_util import schedule, log_pcs
-import warnings
-warnings.filterwarnings("ignore")
+
 
 #set seed for reproducibility
 seed = 12345
@@ -88,41 +90,6 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
     model.train()
     return miou, val_loss, o, y  # Return val_loss
 
-# def load_and_prune_weights(model_7class, checkpoint_path_8class):
-#     print(f"Loading 8-class weights from {checkpoint_path_8class}...")
-#     state_8 = torch.load(checkpoint_path_8class)
-#     state_7 = model_7class.state_dict()
-    
-#     for key in state_7:
-#         if key in state_8:
-#             if state_7[key].shape == state_8[key].shape:
-#                 state_7[key] = state_8[key]
-#             else:
-#                 print(f"Pruning layer: {key} | Old: {state_8[key].shape} -> New: {state_7[key].shape}")
-                
-#                 # CASE 1: Bias (1D Tensor) -> Slice Dim 0 only
-#                 if len(state_7[key].shape) == 1:
-#                     state_7[key][:7] = state_8[key][:7]
-                    
-#                 # CASE 2: Weights (Multi-Dim Tensor)
-#                 else:
-#                     # Slice Dimension 0 (Output Channels)
-#                     # We create a temporary slice first
-#                     temp_slice = state_8[key][:7]
-                    
-#                     # Check if Dimension 1 (Input Channels) also needs slicing
-#                     if state_7[key].shape[1] < temp_slice.shape[1]:
-#                         # Slice Dim 1 as well: [7, 8, ...] -> [7, 7, ...]
-#                         state_7[key][:7, :7] = temp_slice[:, :7]
-#                     else:
-#                         # Only Dim 0 needed slicing
-#                         state_7[key][:7] = temp_slice
-
-#     model_7class.load_state_dict(state_7)
-#     print("Surgery complete. Model ready for 7-class fine-tuning.")
-#     return model_7class
-
-
 
 if __name__ == '__main__':
 
@@ -138,8 +105,8 @@ if __name__ == '__main__':
     parser.add_argument("--loss", choices=['ce','cwce','ohem','mixed'], default='mixed', type=str, help='which loss to use')
     args = parser.parse_args()
 
-    lr0 = 5e-5
-    lre = 1e-5
+    lr0 = 1e-5
+    lre = 1e-6
     eval_every_n_epochs = 10
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -147,6 +114,7 @@ if __name__ == '__main__':
     logdir = "log/train_bimnet++" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
     writer = SummaryWriter(logdir, flush_secs=.5)
+    # scaler = GradScaler()
 
     # Load model
     model = BIMNet(args.num_classes)
@@ -170,7 +138,8 @@ if __name__ == '__main__':
                          batch_size=args.batch_size,
                          shuffle=True,
                          num_workers=4,
-                         drop_last=True)
+                         drop_last=True,
+                         pin_memory=True)
 
     vset = dataset(root_path=args.dset_path,
                    cube_edge=args.val_cube_edge,
@@ -185,7 +154,7 @@ if __name__ == '__main__':
     # set up parameters for training
     steps_per_epoch = len(dset)//args.batch_size
     tot_steps = steps_per_epoch*args.epochs
-    optim = Adam(model.parameters(), weight_decay=1e-6)
+    optim = Adam(model.parameters(), weight_decay=1e-4)
     
 
     # to visualize point cloud
@@ -194,26 +163,26 @@ if __name__ == '__main__':
     best_miou = 0
 
     best_val_loss = float('inf')  # Start with infinity so first loss is always lower
-    val_criterion = nn.CrossEntropyLoss(ignore_index=-1).to(device)
+    val_criterion = nn.CrossEntropyLoss(ignore_index=-100).to(device)
 
     if args.loss == 'ce':
-        loss = nn.CrossEntropyLoss(ignore_index=-1)
+        loss = nn.CrossEntropyLoss(ignore_index=-100)
     elif args.loss == 'cwce':
-        loss = ClassWiseCrossEntropyLoss(ignore_index=-1)
+        loss = ClassWiseCrossEntropyLoss(ignore_index=-100)
     elif args.loss == 'ohem':
-        loss = HNMCrossEntropyLoss(ignore_index=-1)
+        loss = HNMCrossEntropyLoss(ignore_index=-100)
     elif args.loss == 'mixed':
-        loss1 = nn.CrossEntropyLoss(ignore_index=-1, weight=torch.sqrt(
+        loss1 = nn.CrossEntropyLoss(ignore_index=-100, weight=torch.sqrt(
                     torch.tensor(dset.weights, dtype=torch.float32,
                                 device=device)))  # weight=torch.tensor(dset.weights, dtype=torch.float32, device=device))
-        loss2 = ClassWiseCrossEntropyLoss(ignore_index=-1, 
+        loss2 = ClassWiseCrossEntropyLoss(ignore_index=-100, 
                     weight=torch.tensor(np.ones_like(dset.weights), dtype=torch.float32, device=device))
     else:
         raise NotImplementedError
 
     # TRAINING PHASE
     for param in model.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
 
     # Unfreeze ONLY the final output layer (classifier)
     for param in model.out.parameters():
@@ -251,10 +220,10 @@ if __name__ == '__main__':
                 metrics = Metrics(dset.cnames, device=device)
                 # metrics = Metrics(dset.cnames[1:], device=device)
 
-        if e == 5:
-            print("Unfreezing encoder...")
-            for param in model.parameters():
-                param.requires_grad = True
+        # if e == 20:
+        #     print("Unfreezing encoder...")
+        #     for param in model.parameters():
+        #         param.requires_grad = True
        
         pbar = tqdm(dloader, total=steps_per_epoch, desc="Epoch %d/%d, Loss: %.2f, mIoU: %.2f, Progress"%(e+1, args.epochs, 0., 0.))
 
@@ -269,17 +238,28 @@ if __name__ == '__main__':
             optim.zero_grad()
             
             x, y = x.to(device), y.to(device, dtype=torch.long) # shift indices 
-            
+            # with autocast(device_type='cuda'):
+            #     o = model(x)
+            #     if args.loss == 'mixed':
+            #         l = loss2(o, y) * (1 - lam) + loss1(o, y) * (lam)
+            #     else:
+            #         l = loss(o, y)
+            #     # l.backward()
+            # scaler.scale(l).backward()
             o = model(x)
             if args.loss == 'mixed':
                 l = loss2(o, y) * (1 - lam) + loss1(o, y) * (lam)
             else:
                 l = loss(o, y)
+                
             l.backward()
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             metrics.add_sample(o.detach().argmax(dim=1).flatten(), y.flatten())
 
             optim.step()
+            # scaler.step(optim)
+            # scaler.update()
             miou = metrics.percent_mIoU()
             pbar.set_description("Epoch %d/%d, Loss: %.2f, mIoU: %.2f, Progress"%(e+1, args.epochs, l.item(), miou))
             

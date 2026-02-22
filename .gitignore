@@ -72,7 +72,7 @@ log*
 *.json
 *.rar
 
-countpoints.py
+train_bimnet++s3dis_backup.py
 
 #folders to ignore
 output_instances/

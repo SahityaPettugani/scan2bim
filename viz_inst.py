@@ -441,8 +441,8 @@ def extract_bim_parameters(instances_dict):
                         "height": float(height), # Will be close to 0
                         "thickness": 0.2, # Standard slab thickness
                         "geometry": {
-                            "min_x": float(x_min), "min_y": float(y_min), "z_elev": float(z_min),
-                            "max_x": float(x_max), "max_y": float(y_max)
+                            "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_min),
+                            "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_min)
                         }
                     }
             else:
