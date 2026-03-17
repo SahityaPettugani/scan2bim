@@ -46,40 +46,6 @@ def load_point_cloud(file_path):
     print(f"Loaded {len(pcd.points)} points")
     return pcd
 
-<<<<<<< HEAD
-def denoise_point_cloud(pcd, nb_neighbors=30, std_ratio=2.0):
-    print(
-        f"Applying statistical outlier removal "
-        f"(nb_neighbors={nb_neighbors}, std_ratio={std_ratio})..."
-    )
-    filtered_pcd, inlier_idx = pcd.remove_statistical_outlier(
-        nb_neighbors=nb_neighbors,
-        std_ratio=std_ratio
-    )
-    removed = len(pcd.points) - len(inlier_idx)
-    print(f"  Removed {removed} noisy points. Remaining: {len(filtered_pcd.points)}")
-    return filtered_pcd
-
-
-def create_run_output_dir(output_root, input_path):
-    root = Path(output_root)
-    root.mkdir(parents=True, exist_ok=True)
-
-    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", input_path.stem).strip("._")
-    if not safe_stem:
-        safe_stem = "run"
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = root / f"{safe_stem}_{timestamp}"
-
-    suffix = 1
-    while run_dir.exists():
-        suffix += 1
-        run_dir = root / f"{safe_stem}_{timestamp}_{suffix}"
-
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
-
 ID_TO_NAME = {
     0: "ceiling",
     1: "floor",
@@ -91,8 +57,6 @@ ID_TO_NAME = {
     # 7: "unassigned",
 }
 
-=======
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
 def separate_by_label(pcd, point_labels):
     points = np.asarray(pcd.points)
     colors = np.asarray(pcd.colors)
@@ -480,47 +444,13 @@ def instantiate_planar_iterative(
         points = np.asarray(remaining_pcd.points)
 
         plane = pyrsc.Plane()
-<<<<<<< HEAD
         # Note: pyransac3d returns equation (4 floats) and inliers (indices)
-        best_eq, inliers = plane.fit(
-            points,
-            thresh=dist_thresh,
-            minPoints=ransac_min_points,
-            maxIteration=ransac_max_iterations,
-        )
-=======
         best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
         
         if len(inliers) < min_points:
             break
-<<<<<<< HEAD
             
-        # Keep only orientation-consistent planes.
-        normal = np.array(best_eq[:3], dtype=float)
-        normal_norm = np.linalg.norm(normal) + 1e-12
-        normal /= normal_norm
-        z_alignment = abs(normal[2])
-
-        if class_name == "wall":
-            orientation_ok = z_alignment <= wall_vertical_tol
-        elif class_name in ("floor", "ceiling"):
-            orientation_ok = z_alignment >= horizontal_min_alignment
-        else:
-            orientation_ok = True
-
-        if not orientation_ok:
-            print(
-                f"  Rejected plane for {class_name}: |nz|={z_alignment:.3f} "
-                f"(wall<= {wall_vertical_tol}, floor/ceiling>= {horizontal_min_alignment})"
-            )
-            remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
-            continue
-
         # Extract the instance
-=======
-
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
         inst_pcd = remaining_pcd.select_by_index(inliers)
 
         # Additional wall-shape filtering to suppress false wall planes.
@@ -574,7 +504,7 @@ def extract_bim_parameters(instances_dict):
     wall_pts_all = []
     for wall_pcd in instances_dict.get("wall", []):
         pts = np.asarray(wall_pcd.points)
-        if len(pts) >= 50:
+        if len(pts) >= 500:
             wall_pts_all.append(pts)
 
     if wall_pts_all:
@@ -591,58 +521,26 @@ def extract_bim_parameters(instances_dict):
             if len(pts) < 50:
                 continue
 
-            z0, z1 = q(pts[:, 2], 0.02, 0.98)
-            z_med = float(np.median(pts[:, 2]))
-            height = max(0.01, z1 - z0)
-
-<<<<<<< HEAD
-            if class_name in ["floor", "ceiling"]:
-                # Use wall envelope for XY whenever available to keep slabs aligned with room.
-                if wx0 is not None:
-                    x_min, x_max = wx0, wx1
-                    y_min, y_max = wy0, wy1
-                else:
-                    x_min, x_max = q(pts[:, 0], 0.02, 0.98)
-                    y_min, y_max = q(pts[:, 1], 0.02, 0.98)
-
-                # Anchor Z to wall room bounds if available.
-                if wz0 is not None:
-                    z_anchor = wz0 if class_name == "floor" else wz1
-                else:
-                    z_anchor = z_med
-
-                # Robust slab thickness from central z-band.
-                tz0, tz1 = q(pts[:, 2], 0.10, 0.90)
-                slab_thickness = max(0.08, tz1 - tz0)
-
-                bim_obj = {
-                    "id": f"{class_name}_{idx}",
-                    "type": class_name,
-                    "height": float(slab_thickness),
-                    "thickness": float(slab_thickness),
-                    "geometry": {
-                        "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_anchor),
-                        "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_anchor)
-=======
+            # 1. Height (Z-axis extent)
             z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
             height = z_max - z_min
             
             if class_name in ["floor", "ceiling"]:
+                    # Floors/Ceilings are horizontal slabs. Centerlines don't make sense.
+                    # Use a bounding box approach instead.
                     x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
                     y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
                     
                     bim_obj = {
                         "id": f"{class_name}_{idx}",
                         "type": class_name,
-                        "height": float(height), 
-                        "thickness": 0.2, 
+                        "height": float(height), # Will be close to 0
+                        "thickness": 0.2, # Standard slab thickness
                         "geometry": {
                             "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_min),
                             "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_min)
                         }
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
                     }
-                }
             else:
                 xy_pts = pts[:, :2]
                 from sklearn.decomposition import PCA
@@ -667,11 +565,7 @@ def extract_bim_parameters(instances_dict):
                     "id": f"{class_name}_{idx}",
                     "type": class_name,
                     "height": float(height),
-<<<<<<< HEAD
-                    "thickness": thickness,
-=======
-                    "thickness": 0.2, 
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
+                    "thickness": 0.2, # Consider dynamically calculating this later
                     "geometry": {
                         "start_x": float(start_pt[0]), "start_y": float(start_pt[1]), "start_z": float(z0),
                         "end_x": float(end_pt[0]), "end_y": float(end_pt[1]), "end_z": float(z0)
@@ -949,40 +843,10 @@ def main(
         pcd, models, cube_edge=cube_edge, num_classes=num_classes, device=device
     )
 
-<<<<<<< HEAD
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens
-    point_count = len(pcd.points)
-    if enable_smoothing:
-        if point_count > smooth_max_points:
-            print(
-                f"\nStep 0.5: Skipping KNN smoothing because point count "
-                f"({point_count}) exceeds --smooth-max-points ({smooth_max_points})."
-            )
-            print("Use --smooth-max-points with a higher value to force smoothing.")
-        else:
-            print(f"\nStep 0.5: Smoothing predictions with KNN (k={smooth_k})...")
-            point_labels = smooth_labels_knn(pcd, point_labels, k=smooth_k)
-    else:
-        print("\nStep 0.5: KNN smoothing disabled (--no-smooth).")
-
-    if apply_geometric_priors:
-        print("\nStep 0.6: Applying geometric priors to semantic labels...")
-        point_labels = apply_geometric_priors_to_labels(
-            pcd,
-            point_labels,
-            wall_max_abs_nz=wall_max_abs_nz,
-            horiz_min_abs_nz=horiz_min_abs_nz,
-            floor_quantile=floor_quantile,
-            ceiling_quantile=ceiling_quantile,
-            normal_k=normal_k,
-        )
-    else:
-        print("\nStep 0.6: Geometric prior relabeling disabled (--no-geo-priors).")
-=======
     print("\nStep 0.5: Smoothing predictions with KNN...")
     point_labels = smooth_labels_knn(pcd, point_labels, k=5)
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
     
     print("\nStep 1: Separating point cloud by semantic class...")
     separated_classes = separate_by_label(pcd, point_labels)
@@ -1010,27 +874,10 @@ def main(
 
     for class_name, class_pcd in separated_classes.items():
         if class_name in planar_classes:
-<<<<<<< HEAD
-            instances = instantiate_planar_iterative(
-                class_pcd,
-                class_name,
-                dist_thresh=planar_dist_thresh,
-                min_points=planar_min_points,
-                ransac_min_points=ransac_min_points,
-                ransac_max_iterations=ransac_max_iterations,
-                wall_vertical_tol=wall_vertical_tol,
-                horizontal_min_alignment=horizontal_min_alignment,
-                wall_min_height=wall_min_height,
-                wall_min_length=wall_min_length,
-                wall_max_width=wall_max_width,
-            )
+            # UPDATED: Thresh 0.20 handles wavy walls
+            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.05)
         else:
-            params = dbscan_params.get(class_name, {'eps': 0.1, 'min_points': 1000})
-=======
-            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.1)
-        else:
-            params = dbscan_params.get(class_name, {'eps': 0.3, 'min_points': 100})
->>>>>>> 25fd60f5a647402faa23f3e84cb9d42ee04615ff
+            params = dbscan_params.get(class_name, {'eps': 0.1, 'min_points': 100})
             instances = instantiate_with_dbscan(
                 class_pcd,
                 class_name,
