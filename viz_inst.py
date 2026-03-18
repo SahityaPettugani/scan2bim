@@ -24,6 +24,9 @@ import argparse
 import re
 from datetime import datetime
 import math
+import sys
+
+DEFAULT_VIZAINST_CHECKPOINT = r"C:\Users\iamsa\Downloads\val_best_miou.pth"
 
 ID_TO_NAME = {
     0: "ceiling",
@@ -45,6 +48,35 @@ def load_point_cloud(file_path):
     
     print(f"Loaded {len(pcd.points)} points")
     return pcd
+
+def denoise_point_cloud(pcd, nb_neighbors=30, std_ratio=2.0):
+    if len(pcd.points) == 0:
+        return pcd
+
+    print(
+        f"Denoising point cloud with statistical outlier removal "
+        f"(nb_neighbors={nb_neighbors}, std_ratio={std_ratio})..."
+    )
+    filtered_pcd, inlier_indices = pcd.remove_statistical_outlier(
+        nb_neighbors=nb_neighbors,
+        std_ratio=std_ratio,
+    )
+    removed = len(pcd.points) - len(inlier_indices)
+    print(f"Removed {removed} outlier points")
+    return filtered_pcd
+
+def create_run_output_dir(output_dir, input_path):
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", input_path.stem).strip("._")
+    if not stem:
+        stem = "pointcloud"
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_root / f"{stem}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 ID_TO_NAME = {
     0: "ceiling",
@@ -780,6 +812,30 @@ def refine_wall_geometry(
     print(f"Wall refinement: {before} -> {after} wall segments after merge/snap.")
     return others + walls
 
+def _find_latest_vizainst_run(output_root):
+    output_root = Path(output_root)
+    if not output_root.exists():
+        return None
+    candidates = []
+    for path in output_root.rglob("bim_reconstruction_data.json"):
+        try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            pass
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _load_bim_json(json_path):
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(f"Loaded BIM JSON: {json_path}")
+    print(f"Total reconstructed items: {len(data)}")
+    return data
+
+
 def main(
     input_file,
     output_dir="output_instances",
@@ -788,138 +844,36 @@ def main(
     num_classes=7,
     device=None,
     visualize_network_output=False,
-    visualize_instances_flag=True,
-    enable_smoothing=True,
-    smooth_k=5,
-    smooth_max_points=500000,
-    strong_smooth_k=15,
-    planar_dist_thresh=0.15,
-    planar_min_points=2000,
-    ransac_min_points=100,
-    ransac_max_iterations=1000,
-    wall_vertical_tol=0.25,
-    horizontal_min_alignment=0.85,
-    wall_min_height=1.8,
-    wall_min_length=1.0,
-    wall_max_width=1.2,
-    denoise=True,
-    denoise_nb_neighbors=30,
-    denoise_std_ratio=2.0,
-    refine_walls=True,
-    merge_angle_tol_deg=8.0,
-    merge_offset_tol=0.2,
-    merge_gap_tol=0.4,
-    endpoint_snap_tol=0.45,
-    line_proximity_tol=0.25,
-    apply_geometric_priors=True,
-    wall_max_abs_nz=0.35,
-    horiz_min_abs_nz=0.75,
-    floor_quantile=0.35,
-    ceiling_quantile=0.75,
-    normal_k=30,
+    visualize_instances_flag=False,
 ):
+    script_dir = Path(__file__).resolve().parent
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+
+    from vizainst import main as run_vizainst_main
+
+    checkpoint_paths = checkpoint_paths or [DEFAULT_VIZAINST_CHECKPOINT]
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_paths = checkpoint_paths 
-    
-    print("=" * 60)
-    print("Point Cloud Instantiation Workflow (BIMNet + DBSCAN)")
-    print("=" * 60)
 
-    input_path = Path(input_file)
-    pcd = load_point_cloud(input_path)
-    if denoise:
-        pcd = denoise_point_cloud(
-            pcd,
-            nb_neighbors=denoise_nb_neighbors,
-            std_ratio=denoise_std_ratio,
-        )
-    run_output_dir = create_run_output_dir(output_dir, input_path)
-    print(f"Run output directory: {run_output_dir}")
-
-    print("\nLoading BIMNet models...")
-    models = build_models(checkpoint_paths, device, num_classes=num_classes)
-
-    pcd, preds_volume, points_grid, point_labels = run_bimnet_inference(
-        pcd, models, cube_edge=cube_edge, num_classes=num_classes, device=device
+    print("Running pipeline through vizainst.py")
+    result = run_vizainst_main(
+        input_file=input_file,
+        output_dir=output_dir,
+        checkpoint_paths=checkpoint_paths,
+        cube_edge=cube_edge,
+        num_classes=num_classes,
+        device=device,
+        visualize_network_output=visualize_network_output,
+        visualize_instances_flag=visualize_instances_flag,
     )
 
-    # --- NEW STEP: SMOOTH LABELS ---
-    # Fixes salt-and-pepper noise before any separation happens
-    print("\nStep 0.5: Smoothing predictions with KNN...")
-    point_labels = smooth_labels_knn(pcd, point_labels, k=5)
-    
-    print("\nStep 1: Separating point cloud by semantic class...")
-    separated_classes = separate_by_label(pcd, point_labels)
+    bim_json_path = _find_latest_vizainst_run(output_dir)
+    if bim_json_path:
+        _load_bim_json(bim_json_path)
+    else:
+        print("Warning: could not find bim_reconstruction_data.json after vizainst run.")
 
-    if not separated_classes:
-        print("Warning: No classes found! Check your color mappings.")
-        return None
-
-    print("\nStep 2: Instantiating classes...")
-    all_instances = {}
-
-    planar_classes = ['wall', 'floor', 'ceiling']
-    dbscan_params = {
-        'beam':      {'eps': 0.3, 'min_points': 100},
-        'column':    {'eps': 0.3, 'min_points': 100},
-        'window':    {'eps': 0.2, 'min_points': 50},
-        'door':      {'eps': 0.3, 'min_points': 100},
-    }
-
-    # Apply stronger smoothing before instance extraction
-    if enable_smoothing:
-        print(f"Applying strong smoothing (KNN, k={strong_smooth_k})...")
-        point_labels = smooth_labels_knn(pcd, point_labels, k=strong_smooth_k)
-        separated_classes = separate_by_label(pcd, point_labels)
-
-    for class_name, class_pcd in separated_classes.items():
-        if class_name in planar_classes:
-            # UPDATED: Thresh 0.20 handles wavy walls
-            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.05)
-        else:
-            params = dbscan_params.get(class_name, {'eps': 0.1, 'min_points': 100})
-            instances = instantiate_with_dbscan(
-                class_pcd,
-                class_name,
-                eps=params['eps'],
-                min_points=params['min_points'],
-            )
-        all_instances[class_name] = instances
-
-    cleaning_thresholds = {
-        'ceiling': 2000, 
-        'floor': 2000,   
-        'wall': 1000,
-        'beam': 50,
-        'column': 50,
-        'window': 20,
-        'door': 50, 
-    }
-
-    all_instances = filter_small_instances(all_instances, cleaning_thresholds)
-
-    print("\nStep 3: Extracting BIM Parameters and Saving...")
-    save_instances(all_instances, run_output_dir)
-    
-    bim_json_data = extract_bim_parameters(all_instances)
-    if refine_walls:
-        bim_json_data = refine_wall_geometry(
-            bim_json_data,
-            merge_angle_tol_deg=merge_angle_tol_deg,
-            merge_offset_tol=merge_offset_tol,
-            merge_gap_tol=merge_gap_tol,
-            endpoint_snap_tol=endpoint_snap_tol,
-            line_proximity_tol=line_proximity_tol,
-        )
-    with open(Path(run_output_dir) / "bim_reconstruction_data.json", "w") as f:
-        json.dump(bim_json_data, f, indent=4)
-    print(f"BIM parameters saved to {run_output_dir}/bim_reconstruction_data.json")
-
-    if visualize_instances_flag:
-        print("\nStep 4: Visualizing extracted instances...")
-        visualize_instances(all_instances, show_by_class=False)
-
-    return all_instances, separated_classes, pcd
+    return result
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -927,7 +881,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--input_file", required=True, help="Path to input point cloud (.ply/.pcd)")
     parser.add_argument("--output_dir", default="output_instances", help="Root output directory (a new subfolder is created per run)")
-    parser.add_argument("--checkpoint", action="append", required=True, help="Path(s) to BIMNet checkpoint(s)")
+    parser.add_argument(
+        "--checkpoint",
+        action="append",
+        default=[],
+        help="Path(s) to BIMNet checkpoint(s). Defaults to val_best_miou.pth if omitted.",
+    )
     parser.add_argument("--cube_edge", type=int, default=96, help="Voxel grid edge length")
     parser.add_argument("--num_classes", type=int, default=7, help="Number of BIMNet output classes")
     parser.add_argument("--cpu", action="store_true", help="Force CPU")
@@ -1021,41 +980,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
 
+    checkpoint_paths = args.checkpoint or [DEFAULT_VIZAINST_CHECKPOINT]
+
     main(
         input_file=args.input_file,
         output_dir=args.output_dir,
-        checkpoint_paths=args.checkpoint,
+        checkpoint_paths=checkpoint_paths,
         cube_edge=args.cube_edge,
         num_classes=args.num_classes,
         device=device,
         visualize_network_output=args.vis_net,
         visualize_instances_flag=(not args.no_vis_instances) or args.vis_instances,
-        enable_smoothing=not args.no_smooth,
-        smooth_k=args.smooth_k,
-        smooth_max_points=args.smooth_max_points,
-        strong_smooth_k=args.strong_smooth_k,
-        planar_dist_thresh=args.planar_dist_thresh,
-        planar_min_points=args.planar_min_points,
-        ransac_min_points=args.ransac_min_points,
-        ransac_max_iterations=args.ransac_max_iterations,
-        wall_vertical_tol=args.wall_vertical_tol,
-        horizontal_min_alignment=args.horizontal_min_alignment,
-        wall_min_height=args.wall_min_height,
-        wall_min_length=args.wall_min_length,
-        wall_max_width=args.wall_max_width,
-        denoise=not args.no_denoise,
-        denoise_nb_neighbors=args.denoise_nb_neighbors,
-        denoise_std_ratio=args.denoise_std_ratio,
-        refine_walls=not args.no_refine_walls,
-        merge_angle_tol_deg=args.merge_angle_tol_deg,
-        merge_offset_tol=args.merge_offset_tol,
-        merge_gap_tol=args.merge_gap_tol,
-        endpoint_snap_tol=args.endpoint_snap_tol,
-        line_proximity_tol=args.line_proximity_tol,
-        apply_geometric_priors=not args.no_geo_priors,
-        wall_max_abs_nz=args.wall_max_abs_nz,
-        horiz_min_abs_nz=args.horiz_min_abs_nz,
-        floor_quantile=args.floor_quantile,
-        ceiling_quantile=args.ceiling_quantile,
-        normal_k=args.normal_k,
     )
