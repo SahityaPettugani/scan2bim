@@ -25,6 +25,7 @@ import re
 from datetime import datetime
 import math
 import sys
+import os
 
 DEFAULT_VIZAINST_CHECKPOINT = r"C:\Users\iamsa\Downloads\val_best_miou.pth"
 
@@ -37,6 +38,9 @@ ID_TO_NAME = {
     5: "window",
     6: "door",
 }
+
+def is_visualization_disabled():
+    return os.environ.get("DISABLE_OPEN3D_VISUALIZER") == "1"
 
 def load_point_cloud(file_path):
     print(f"Loading point cloud from: {file_path}")
@@ -294,6 +298,10 @@ def generate_distinct_colors(n_colors):
     return colors
 
 def visualize_instances(instances_dict, show_by_class=True):
+    if is_visualization_disabled():
+        print("Skipping Open3D visualization because DISABLE_OPEN3D_VISUALIZER=1")
+        return
+
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
     
@@ -331,6 +339,10 @@ def visualize_instances(instances_dict, show_by_class=True):
                                         width=1024, height=768)
 
 def visualize_summary(instances_dict, separated_classes, original_pcd):
+    if is_visualization_disabled():
+        print("Skipping Open3D visualization because DISABLE_OPEN3D_VISUALIZER=1")
+        return
+
     print("\n" + "=" * 60)
     print("VISUALIZATION MODE")
     print("=" * 60)
